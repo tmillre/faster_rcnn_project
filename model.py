@@ -44,6 +44,7 @@ import numpy.random
 from coco_dict import *
 from datasetloader import *
 from boxplot import *
+from classifyNet import *
 
 
 class PreTrainedResNet(nn.Module):
@@ -80,7 +81,7 @@ class PreTrainedResNet(nn.Module):
             for param in self.shortResnet.parameters():
                 param.requires_grad = False
 
-        
+        self.clNet = ClassifyNetwork(finalFeatures = finalFeatures, N_CLASSES = len(list(id2Label.keys())))
     
         self.interLayer = nn.Conv2d(finalFeatures, 256, 3, stride = 1, padding = 1)
     
@@ -101,6 +102,8 @@ class PreTrainedResNet(nn.Module):
         #Losses
         self.valLoss = []
         self.trainLoss = []
+        self.fastLoss = []
+        self.rpnLoss = []
     
     def forward(self, x):
         #TODO3: Forward pass x through the model
@@ -109,6 +112,32 @@ class PreTrainedResNet(nn.Module):
         cls_logit = self.cls_logit(x)
         reg = self.reg(x)
         return cls_logit, reg
+    
+    
+    '''
+    save:
+        saves parameters to a file
+        dirName: directory to save parameters in
+    '''
+    def save(self, dirName):
+        if not os.path.isdir(dirName):
+            os.mkdir(dirName)
+        torch.save(self.state_dict(), dirName + '/RPN.pt')
+        torch.save(self.clNet.state_dict(), dirName + '/classifyNet.pt')
+    
+    '''
+    load:
+        loads parameters from file.
+        dirName: directory to load parameters from
+    '''
+    def load(self, dirName):
+        try:
+            self.load_state_dict(torch.load(dirName + '/RPN.pt'))
+            self.clNet.load_state_dict(torch.load(dirName + '/classifyNet.pt'))
+        except:
+            print('Error loading file')
+    
+    
 
     '''
     predict
@@ -120,78 +149,11 @@ class PreTrainedResNet(nn.Module):
     output:
         None (displays an image. Can modify this...)
     '''
-    def predict(self, img, cutoff = 0.90, boxParams = None):
+    def predict(self, img, cutoff = 0.90, boxParams = None, dummyLabel = False):
+        input_features = self.shortResnet.forward(img)
         cls, reg = self.forward(img)
-        pObj = torch.empty((cls.shape[0], cls.shape[1], cls.shape[2], cls.shape[3]))
-        sig = torch.nn.Sigmoid()
-
-        if boxParams == None:
-            boxParams = [[8, 0.5], [8, 1.], [8, 2], [16, 0.5], [16, 1.], [16, 2.], [32, 0.5], [32, 1.], [32, 2.]]
+        self.clNet.predict(img, input_features, cls, reg, cutoff = cutoff, boxParams = boxParams, dummyLabel = dummyLabel)
         
-        for i in range(9):
-            pObj[:,i,:,:] = sig(cls[:,i, :, :].detach())
-            
-        pObj = pObj.numpy()
-        #now we have a numpy array with probabilities for each anchor box...
-        originalP = pObj.copy()
-    
-        goodBox = np.where(pObj >= cutoff)
-        pObj[goodBox] = 1000
-        pObj = np.sum(pObj, axis = 1)
-        goodArea = np.where(pObj >= 1000)
-        badArea = np.where(pObj < 1000)
-        pObj[goodArea] = 1
-        pObj[badArea] = 0
-    
-        #show objects of feature scale!
-        plt.imshow(pObj[0,:,:])
-        plt.show()
-    
-        fScale = img.shape[2] / cls.shape[2]
-    
-        predAnnotation = {}
-        predBoxes = []
-        predLabs = []
-        predScores = []
-    
-        #Below, we get our "good" boxes in standard form
-        for i in range(len(goodBox[0])):
-            featureCoords = [goodBox[0][i], goodBox[1][i], goodBox[2][i], goodBox[3][i]]
-            t = reg[featureCoords[0], (4 * featureCoords[1]):(4 * featureCoords[1] + 4), featureCoords[2], featureCoords[3]].detach()
-        
-            anchorParams = boxParams[featureCoords[1]]
-            anchorCtr = [(featureCoords[3] + 0.5) * fScale, (featureCoords[2] + 0.5) * fScale]
-            anchorWH = (anchorParams[0] * np.sqrt(1/anchorParams[1]), anchorParams[0] * np.sqrt(anchorParams[1]))
-        
-            predCtr = [(t[0] * anchorWH[0] + anchorCtr[0]).item(), (t[1] * anchorWH[1] + anchorCtr[1]).item()]
-            predWH = [(np.exp(t[2]) * anchorWH[0]).item(), (np.exp(t[3]) * anchorWH[1]).item()]
-        
-            tBox = [predCtr[0] - 0.5 * predWH[0], predCtr[1] - 0.5 * predWH[1], predCtr[0] + 0.5 * predWH[0], predCtr[1] + 0.5 * predWH[1]]
-            if tBox[0] > 0 and tBox[1] > 0:
-                predBoxes.append(tBox)
-                predScores.append(originalP[featureCoords[0], featureCoords[1], featureCoords[2], featureCoords[3]])
-                
-        #Below, we look at our boxes and do non-maximum suppression.
-        #that is, for a given box, nearby boxes that overlap significantly
-        #and have smaller score will be removed if any are present
-        if len(predBoxes) > 0:
-            keep = torchvision.ops.nms(torch.tensor(predBoxes), torch.tensor(predScores), 0.7)
-        
-            finalBoxes = []
-            for i in range(keep.shape[0]):
-                finalBoxes.append(predBoxes[keep[i]])
-                predLabs.append(torch.tensor([0]))
-        
-            predAnnotation['boxes'] = torch.tensor([finalBoxes])
-            predAnnotation['label'] = predLabs
-            showBoxes(img, predAnnotation)
-            
-            input_features = self.shortResnet.forward(img)
-            output_size = (10, 10)
-            roi_annotations = torch.ones(predAnnotation['boxes'][0,:,:].shape[0], 5)
-            roi_annotations[:,1:] = predAnnotation['boxes'][0,:,:]
-            roi_pooled = torchvision.ops.roi_pool(input_features, roi_annotations, output_size, fScale)
-            print(roi_pooled.shape)
     
     '''
     compRPNLoss
@@ -248,6 +210,7 @@ class PreTrainedResNet(nn.Module):
         for j, dex in enumerate(l):
             totalClsLoss += clsLoss(cls[dex[0],dex[3], dex[1], dex[2]], torch.tensor(0.))
             
+        
         return totalClsLoss / 256 + lam * totalRegLoss / (target["featureSize"][0] * target["featureSize"][1])
     
     '''
@@ -258,25 +221,21 @@ class PreTrainedResNet(nn.Module):
       Outputs:
           None
     '''
-    def train(self, trainLoader, valLoader, box_params, lamb = 10., NUM_EPOCHS = 20, learnRate = 0.0001):
+    def train(self, trainLoader, valLoader, box_params, lamb = 10.,
+              class_start = 26, NUM_EPOCHS = 20, learnRate = 0.003):
         optimizer = torch.optim.Adam(self.parameters(), lr=learnRate)
+        fastRCNN_opt = torch.optim.Adam(self.clNet.parameters(), lr=learnRate)
         
         for n in range(NUM_EPOCHS):
+            st_time = time.time()
             epochValLoss = 0.0
             epochTrainLoss = 0.0
+            epochFastLoss = 0.0
+            epochRPNLoss = 0.0
             totalLoss = 0.0
-            for k, data in enumerate(valLoader, 0):
-                if self.IS_GPU:
-                    inputs = Variable(data[0].cuda())
-                    target = data[1]
-                else:
-                    inputs = Variable(data[0])
-                    target = data[1]
-                
-                totalRegLoss = 0
-                totalClsLoss = 0
-        
-                epochValLoss += self.compRPNLoss(inputs, target, box_params, lam = lamb).item()
+            
+            #computer training losses...
+            #and backward propegate
         
             for k, data in enumerate(trainLoader, 0):
                 if self.IS_GPU:
@@ -298,8 +257,54 @@ class PreTrainedResNet(nn.Module):
                 totalLoss.backward()
                 optimizer.step()
                 
+                if len(self.valLoss) > class_start:
+                    input_features = self.shortResnet.forward(inputs)
+                    cls, reg = self.forward(inputs)
+            
+                    fastRCNN_opt.zero_grad()
+                    fastLoss = self.clNet.compLoss(inputs, input_features, cls,
+                                               reg, target, boxParams = box_params)
+                    fastLoss.backward()
+                    fastRCNN_opt.step()
+                else:
+                    fastLoss = torch.tensor([0.0])
+                
+                epochTrainLoss += fastLoss.item()
+                epochFastLoss += fastLoss.item()
+                epochRPNLoss += totalLoss.item()
+                
+            #compute performance on validation set
+            
+            for k, data in enumerate(valLoader, 0):
+                if self.IS_GPU:
+                    inputs = Variable(data[0].cuda())
+                    target = data[1]
+                else:
+                    inputs = Variable(data[0])
+                    target = data[1]
+                
+                totalRegLoss = 0
+                totalClsLoss = 0
+        
+                epochValLoss += self.compRPNLoss(inputs, target, box_params, lam = lamb).item()
+                
+                if len(self.valLoss) > class_start:
+                    input_features = self.shortResnet.forward(inputs)
+                    cls, reg = self.forward(inputs)
+                
+                    fastLoss = self.clNet.compLoss(inputs, input_features, cls, reg, target).item()
+                else:
+                    fastLoss = torch.tensor([0.0])
+                
+                epochValLoss += fastLoss
+            
+                
             #Here, we need to get proposals from RPN, non-max suppress, ROI pool, and feed into classifier...
             #See predict method here for idea on how to do that
     
             self.valLoss.append(epochValLoss)
+            if len(self.valLoss) > class_start:
+                self.fastLoss.append(epochFastLoss)
             self.trainLoss.append(epochTrainLoss)
+            self.rpnLoss.append(epochRPNLoss)
+            print('Epoch ', n,' : Time required -> ', time.time() - st_time)

@@ -55,10 +55,12 @@ def showBoxes(img, annotations):
         thickness = 1
         fontScale = 0.2
         try:
-            asNp = cv2.rectangle(asNp, start_point, end_point, color, thickness)
             asNp = cv2.putText(asNp, id2Label[annotations["label"][i][0].item()], start_point , cv2.FONT_HERSHEY_SIMPLEX, fontScale, color , thickness,  cv2.LINE_AA)
+            asNp = cv2.rectangle(asNp, start_point, end_point, color, thickness)
         except TypeError:
             print(start_point, end_point)
+        except KeyError:
+            continue
     plt.imshow(asNp)
 
 '''

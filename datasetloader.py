@@ -174,7 +174,11 @@ class DataSet:
         
         fileNum = 0
         
-        for fileName in os.listdir(os.path.join(path, inputFolder)):
+        fileList = os.listdir(os.path.join(path, inputFolder))
+        
+        np.random.shuffle(fileList)
+        
+        for fileName in fileList:
             if fileName.split('.')[-1] not in ['png', 'jpeg', 'jpg']:
                 continue
             fileInfo = {}
@@ -188,16 +192,22 @@ class DataSet:
             
             loadImg = loadImg.resize((int(w * scale), int(h * scale)))
             
-            self.data.append(np.asarray(loadImg))
-            
             currImgAnnotation = annotations[annotations["filename"] == fileName]
             
             tempBox = []
             tempLabel = []
             
             for index, row in currImgAnnotation.iterrows():
-                tempBox.append([row["xmin"] * scale, row['ymin'] * scale, row["xmax"] * scale, row["ymax"] * scale])
+                holdBox = [row["xmin"] * scale, row['ymin'] * scale, row["xmax"] * scale, row["ymax"] * scale]
+                if (holdBox[3] - holdBox[1]) < 1 or (holdBox[2] - holdBox[0]) < 1:
+                    continue
+                tempBox.append(holdBox)
                 tempLabel.append(label2id[row["class"]])
+                
+            if len(tempBox) < 1 or len(np.asarray(loadImg).shape) < 3:
+                continue
+                
+            self.data.append(np.asarray(loadImg))
             
             fileInfo["boxes"] = torch.as_tensor(tempBox, dtype = torch.float32)
             fileInfo["label"] = tempLabel
