@@ -149,10 +149,11 @@ class PreTrainedResNet(nn.Module):
     output:
         None (displays an image. Can modify this...)
     '''
-    def predict(self, img, cutoff = 0.90, boxParams = None, dummyLabel = False):
+    def predict(self, img, cutoff = 0.90, boxParams = None, dummyLabel = False, secondLabel = False):
         input_features = self.shortResnet.forward(img)
         cls, reg = self.forward(img)
-        self.clNet.predict(img, input_features, cls, reg, cutoff = cutoff, boxParams = boxParams, dummyLabel = dummyLabel)
+        self.clNet.predict(img, input_features, cls, reg, cutoff = cutoff,
+                           boxParams = boxParams, dummyLabel = dummyLabel, secondLabel = secondLabel)
         
     
     '''
@@ -194,7 +195,10 @@ class PreTrainedResNet(nn.Module):
             
             #calculate t parameters for box
             t = torch.tensor([(actualCtr[0] - anchorCtr[0]) / anchorWH[0], (actualCtr[1] - anchorCtr[1]) / anchorWH[1],
-                np.log(actualWH[0] / anchorWH[0]), np.log(actualWH[1] / anchorWH[1])])
+               np.log(actualWH[0] / anchorWH[0]), np.log(actualWH[1] / anchorWH[1])])
+            
+            #t = torch.tensor([(actualCtr[1] - anchorCtr[0]) / anchorWH[0], (actualCtr[0] - anchorCtr[1]) / anchorWH[1],
+            #    np.log(actualWH[1] / anchorWH[0]), np.log(actualWH[0] / anchorWH[1])])
             
             #compute loss for system
             totalRegLoss += regLoss(t, reg[dex[0], (dex[3] * 4): (dex[3] * 4 + 4), dex[1], dex[2]])
@@ -237,16 +241,13 @@ class PreTrainedResNet(nn.Module):
             #computer training losses...
             #and backward propegate
         
-            for k, data in enumerate(trainLoader, 0):
+            for k, tdata in enumerate(trainLoader, 0):
                 if self.IS_GPU:
-                    inputs = Variable(data[0].cuda())
-                    target = data[1]
+                    inputs = Variable(tdata[0].cuda())
+                    target = tdata[1]
                 else:
-                    inputs = Variable(data[0])
-                    target = data[1]
-                
-                totalRegLoss = 0
-                totalClsLoss = 0
+                    inputs = Variable(tdata[0])
+                    target = tdata[1]
         
                 optimizer.zero_grad()
         
@@ -275,16 +276,13 @@ class PreTrainedResNet(nn.Module):
                 
             #compute performance on validation set
             
-            for k, data in enumerate(valLoader, 0):
+            for k, vdata in enumerate(valLoader, 0):
                 if self.IS_GPU:
-                    inputs = Variable(data[0].cuda())
-                    target = data[1]
+                    inputs = Variable(vdata[0].cuda())
+                    target = vdata[1]
                 else:
-                    inputs = Variable(data[0])
-                    target = data[1]
-                
-                totalRegLoss = 0
-                totalClsLoss = 0
+                    inputs = Variable(vdata[0])
+                    target = vdata[1]
         
                 epochValLoss += self.compRPNLoss(inputs, target, box_params, lam = lamb).item()
                 

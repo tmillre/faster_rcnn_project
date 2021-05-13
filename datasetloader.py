@@ -139,7 +139,7 @@ class DataSet:
     
 
     def __init__(self, fold="train", path=os.path.join("DataRaw","roboflow"),
-                 transform=None, target_transform=None, max_img = None, boxParams = None):
+                 transform=None, target_transform=None, max_img = None, boxParams = None, maxDim = 300):
         
         fold = fold.lower()
 
@@ -185,8 +185,8 @@ class DataSet:
             
             loadImg = Image.open(os.path.join(os.path.join(path, inputFolder), fileName))
             w, h = loadImg.size
-            #scale = 600 / min(w, h) #resize s.t. smaller size is 600
-            scale = 300 / max(w, h) #resize s.t. larger size is 600
+            
+            scale = maxDim / max(w, h) #resize s.t. larger size is 600
             
             fileInfo["scale"] = torch.tensor(scale, dtype=torch.float32)
             

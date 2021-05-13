@@ -55,7 +55,7 @@ class ClassifyNetwork(nn.Module):
 
         self.IS_GPU = IS_GPU
         
-        #self.interLayer = nn.Conv2d(finalFeatures, 256, 3, stride = 1, padding = 1)
+        self.interLayer = nn.Conv2d(finalFeatures, 256, 3, stride = 1, padding = 1)
     
         self.choice = nn.Linear(finalFeatures * roiSize * roiSize, N_CLASSES + 1)
         self.bbox = nn.Linear(finalFeatures * roiSize * roiSize, 4 * (N_CLASSES + 1))
@@ -63,8 +63,7 @@ class ClassifyNetwork(nn.Module):
         self.roiSize = roiSize
     
     def forward(self, x):
-        #TODO3: Forward pass x through the model
-        y = F.relu(self.interLayer(x))
+        y = x#F.relu(self.interLayer(x))
         y = y.view(y.shape[0], -1)
         return self.choice(y), self.bbox(y).view(x.shape[0], self.N_CLASSES + 1, -1)
     
@@ -80,7 +79,7 @@ class ClassifyNetwork(nn.Module):
     '''
     
     def compLoss(self, img, imgFeatures, cls, reg, target, boxParams = None,
-              minPos = 0.5, posPercent = 0.25, batchSize = 128, lam = 1.0):
+              minPos = 0.5, posPercent = 0.5, batchSize = 128, lam = 1.0):
         minDim = 8
         pObj = torch.empty((cls.shape[0], cls.shape[1], cls.shape[2], cls.shape[3]))
         sig = torch.nn.Sigmoid()
@@ -121,21 +120,21 @@ class ClassifyNetwork(nn.Module):
             predWH = [(np.exp(t[2]) * anchorWH[0]).item(), (np.exp(t[3]) * anchorWH[1]).item()]
         
             tBox = [predCtr[0] - 0.5 * predWH[0], predCtr[1] - 0.5 * predWH[1], predCtr[0] + 0.5 * predWH[0], predCtr[1] + 0.5 * predWH[1]]
-            '''
+            
             if tBox[0] < 0:
                 tBox[0] = 0.
             if tBox[1] < 0:
-                tBox[1] < 0.
+                tBox[1] = 0.
             if tBox[2] > img.shape[3]:
                 tBox[2] = img.shape[3]
             if tBox[3] > img.shape[2]:
                 tBox[3] = img.shape[2]
-            '''
+            
             if np.abs(tBox[2] - tBox[0]) > minDim and np.abs(tBox[3] - tBox[1]) > minDim:
                 predBoxes.append(tBox)
                 predScores.append(originalP[featureCoords[0], featureCoords[1], featureCoords[2], featureCoords[3]])
                 
-
+        
         #Below, we look at our boxes and do non-maximum suppression.
         #that is, for a given box, nearby boxes that overlap significantly
         #and have smaller score will be removed if any are present
@@ -161,7 +160,13 @@ class ClassifyNetwork(nn.Module):
         if actualBbox.shape[0] < 1:
             print(actualBbox)
             return torch.tensor(0.0)
-        
+        '''
+        hold = finalBoxes.clone()
+        finalBoxes[:, 0] = hold[:,1]
+        finalBoxes[:, 1] = hold[:,0]
+        finalBoxes[:, 2] = hold[:,3]
+        finalBoxes[:, 3] = hold[:,2]
+        '''
         IOUMatrix = torchvision.ops.box_iou(actualBbox, finalBoxes).numpy()
         
         maxes = np.max(IOUMatrix, axis = 0)
@@ -208,12 +213,21 @@ class ClassifyNetwork(nn.Module):
             finalLabels[i] = gtLabels[noIOU[i - numPos - numNeg]]
             finalCoords.append(coords[noIOU[i - numPos - numNeg]])
             
-            
+        '''
+        It turns out our boxes have their coordinates flipped. We fix that here
+        '''
+        hold = roi_annotations.clone()
+        roi_annotations[:, 1] = hold[:,2]
+        roi_annotations[:, 2] = hold[:,1]
+        roi_annotations[:, 3] = hold[:,4]
+        roi_annotations[:, 4] = hold[:,3]
         
-        output_size = (self.roiSize, self.roiSize)
-        roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations, output_size, 1/fScale)
         
-        clsLoss = torch.nn.CrossEntropyLoss()
+        output_size = self.roiSize
+        
+        roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations, output_size = output_size, spatial_scale = 1/fScale)
+        roi_pooled = torch.clamp(roi_pooled, min = -1000, max = 1000)
+        #clsLoss = torch.nn.functional.cross_entropy()
         regLoss = torch.nn.SmoothL1Loss()
         
         #implement loss and backwards step!
@@ -225,6 +239,7 @@ class ClassifyNetwork(nn.Module):
         else:
             catch, bboxes = self.forward(roi_pooled)
         
+        j = 0
         for i in range(len(finalCoords)):
             #get anchor params...
             if finalLabels[i] >= 0:
@@ -251,14 +266,21 @@ class ClassifyNetwork(nn.Module):
                     continue
             
                 #calculate t parameters for box
-                t = torch.tensor([(actualCtr[0] - anchorCtr[0]) / anchorWH[0], (actualCtr[1] - anchorCtr[1]) / anchorWH[1],
-                                  np.log(actualWH[0] / anchorWH[0]), np.log(actualWH[1] / anchorWH[1])])
+                '''
+                Note we flipped the coordinates!
+                '''
+                t = torch.tensor([(actualCtr[0] - anchorCtr[1]) / anchorWH[1], (actualCtr[1] - anchorCtr[0]) / anchorWH[0],
+                                  np.log(actualWH[0] / anchorWH[1]), np.log(actualWH[1] / anchorWH[0])])
             
                 #compute loss for system
                 totalRegLoss += regLoss(t, bboxes[i, targetLabel, :].squeeze(0))
-                totalClsLoss += ((batchSize - numPos) / numPos) * 10 *  clsLoss(catch[i, :].unsqueeze(0), targetLabel)
+                #totalClsLoss += ((batchSize - numPos) / numPos) * torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), targetLabel)
+                totalClsLoss += torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), targetLabel)
             else:
-                totalClsLoss += clsLoss(catch[i, :].unsqueeze(0), torch.tensor([self.N_CLASSES]))
+                if j > numPos:
+                    continue
+                j += 1
+                totalClsLoss += torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), torch.tensor([self.N_CLASSES]))
                 
         return totalClsLoss + lam * totalRegLoss
         
@@ -274,7 +296,8 @@ class ClassifyNetwork(nn.Module):
     '''
         
     
-    def predict(self, img, imgFeatures, cls, reg, cutoff = 0.90, boxParams = None, dummyLabel = False):
+    def predict(self, img, imgFeatures, cls, reg, cutoff = 0.90, boxParams = None,
+                minDim = 8, dummyLabel = False, secondLabel = False):
         pObj = torch.empty((cls.shape[0], cls.shape[1], cls.shape[2], cls.shape[3]))
         sig = torch.nn.Sigmoid()
 
@@ -312,6 +335,7 @@ class ClassifyNetwork(nn.Module):
         #Below, we get our "good" boxes in standard form
         for i in range(len(goodBox[0])):
             featureCoords = [goodBox[0][i], goodBox[1][i], goodBox[2][i], goodBox[3][i]]
+            #print(featureCoords)
             t = reg[featureCoords[0], (4 * featureCoords[1]):(4 * featureCoords[1] + 4), featureCoords[2], featureCoords[3]].detach()
         
             anchorParams = boxParams[featureCoords[1]]
@@ -322,18 +346,19 @@ class ClassifyNetwork(nn.Module):
             predWH = [(np.exp(t[2]) * anchorWH[0]).item(), (np.exp(t[3]) * anchorWH[1]).item()]
         
             tBox = [predCtr[0] - 0.5 * predWH[0], predCtr[1] - 0.5 * predWH[1], predCtr[0] + 0.5 * predWH[0], predCtr[1] + 0.5 * predWH[1]]
-            '''
+            
             if tBox[0] < 0:
                 tBox[0] = 0.
             if tBox[1] < 0:
                 tBox[1] = 0.
-            if tBox[2] > img.shape[0]:
-                tBox[2] = img.shape[0]
-            if tBox[3] > img.shape[1]:
-                tBox[3] = img.shape[1]
-            '''
-            predBoxes.append(tBox)
-            predScores.append(originalP[featureCoords[0], featureCoords[1], featureCoords[2], featureCoords[3]])
+            if tBox[2] > img.shape[3]:
+                tBox[2] = img.shape[3]
+            if tBox[3] > img.shape[2]:
+                tBox[3] = img.shape[2]
+            
+            if np.abs(tBox[2] - tBox[0]) > minDim and np.abs(tBox[3] - tBox[1]) > minDim:
+                predBoxes.append(tBox)
+                predScores.append(originalP[featureCoords[0], featureCoords[1], featureCoords[2], featureCoords[3]])
 
         #Below, we look at our boxes and do non-maximum suppression.
         #that is, for a given box, nearby boxes that overlap significantly
@@ -350,17 +375,40 @@ class ClassifyNetwork(nn.Module):
                 
             predAnnotation['boxes'] = torch.tensor([finalBoxes])
             
-            output_size = (self.roiSize, self.roiSize)
-            roi_annotations = torch.ones(predAnnotation['boxes'][0,:,:].shape[0], 5)
+            output_size = self.roiSize
+            roi_annotations = torch.zeros(predAnnotation['boxes'][0,:,:].shape[0], 5)
             roi_annotations[:,1:] = predAnnotation['boxes'][0,:,:]
-            roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations, output_size, fScale)
             
+            '''
+            It turns out our boxes have their coordinates flipped. We fix that here
+            '''
+            
+            hold = roi_annotations.clone()
+            roi_annotations[:, 1] = hold[:,2]
+            roi_annotations[:, 2] = hold[:,1]
+            roi_annotations[:, 3] = hold[:,4]
+            roi_annotations[:, 4] = hold[:,3]
+            
+            roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations, output_size = output_size, spatial_scale = 1/fScale)
+            #roi_pooled = roi_pool(imgFeatures, roi_annotations)
+            #print(roi_annotations)
+            #print(roi_pooled[0,0,:,:])
+            #print(roi_pooled[1,0,:,:])
+            roi_pooled = torch.clamp(roi_pooled, min = -100, max = 100)
+            #print(roi_pooled)
             
             #TODO: modify for double classification
             catch, bboxes = self.forward(roi_pooled)
+            #print(catch)
             
             if dummyLabel:
                 predLabs = torch.tensor(predLabs).unsqueeze(1)
+            elif secondLabel:
+                predLabs = torch.argmax(catch, dim = 1).unsqueeze(1)
+                for i, lab in enumerate(predLabs):
+                    catch[i, lab] = -10000
+                print(catch.shape)
+                predLabs = torch.argmax(catch, dim = 1).unsqueeze(1)
             else:
                 predLabs = torch.argmax(catch, dim = 1).unsqueeze(1)
                 
