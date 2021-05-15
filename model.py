@@ -48,7 +48,8 @@ from classifyNet import *
 
 
 class PreTrainedResNet(nn.Module):
-    def __init__(self, feature_extracting = True, model = 'resnet18', IS_GPU = False):
+    def __init__(self, feature_extracting = True, model = 'resnet18',
+                 IS_GPU = False, roiSize = 2):
         super(PreTrainedResNet, self).__init__()
 
         self.IS_GPU = IS_GPU
@@ -81,7 +82,8 @@ class PreTrainedResNet(nn.Module):
             for param in self.shortResnet.parameters():
                 param.requires_grad = False
 
-        self.clNet = ClassifyNetwork(finalFeatures = finalFeatures, N_CLASSES = len(list(id2Label.keys())))
+        self.clNet = ClassifyNetwork(finalFeatures = finalFeatures, roiSize = roiSize, 
+                                     N_CLASSES = len(list(id2Label.keys())), IS_GPU = self.IS_GPU)
     
         self.interLayer = nn.Conv2d(finalFeatures, 256, 3, stride = 1, padding = 1)
     
@@ -150,8 +152,13 @@ class PreTrainedResNet(nn.Module):
         None (displays an image. Can modify this...)
     '''
     def predict(self, img, cutoff = 0.90, boxParams = None, dummyLabel = False, secondLabel = False):
-        input_features = self.shortResnet.forward(img)
-        cls, reg = self.forward(img)
+        
+        if self.IS_GPU:
+          input_features = self.shortResnet.forward(img.cuda())
+          cls, reg = self.forward(img.cuda())
+        else:
+          input_features = self.shortResnet.forward(img)
+          cls, reg = self.forward(img)
         self.clNet.predict(img, input_features, cls, reg, cutoff = cutoff,
                            boxParams = boxParams, dummyLabel = dummyLabel, secondLabel = secondLabel)
         
@@ -201,8 +208,12 @@ class PreTrainedResNet(nn.Module):
             #    np.log(actualWH[1] / anchorWH[0]), np.log(actualWH[0] / anchorWH[1])])
             
             #compute loss for system
-            totalRegLoss += regLoss(t, reg[dex[0], (dex[3] * 4): (dex[3] * 4 + 4), dex[1], dex[2]])
-            totalClsLoss += clsLoss(cls[dex[0], dex[3], dex[1], dex[2]], torch.tensor(1.))
+            if not self.IS_GPU:
+              totalRegLoss += regLoss(t, reg[dex[0], (dex[3] * 4): (dex[3] * 4 + 4), dex[1], dex[2]])
+              totalClsLoss += clsLoss(cls[dex[0], dex[3], dex[1], dex[2]], torch.tensor(1.))
+            else:
+              totalRegLoss += regLoss(t.cuda(), reg[dex[0], (dex[3] * 4): (dex[3] * 4 + 4), dex[1], dex[2]])
+              totalClsLoss += clsLoss(cls[dex[0], dex[3], dex[1], dex[2]].cuda(), torch.tensor(1.).cuda())
             if i > 128:
                 break
         
@@ -212,8 +223,13 @@ class PreTrainedResNet(nn.Module):
         np.random.shuffle(l)
         l = l[0:(256 - i)]
         for j, dex in enumerate(l):
+          if self.IS_GPU:
+            totalClsLoss += clsLoss(cls[dex[0],dex[3], dex[1], dex[2]], torch.tensor(0.).cuda())
+          else:
             totalClsLoss += clsLoss(cls[dex[0],dex[3], dex[1], dex[2]], torch.tensor(0.))
-            
+
+        if self.IS_GPU:
+          return totalClsLoss / 256 + lam * totalRegLoss / (target["featureSize"][0].cuda() * target["featureSize"][1].cuda())
         
         return totalClsLoss / 256 + lam * totalRegLoss / (target["featureSize"][0] * target["featureSize"][1])
     

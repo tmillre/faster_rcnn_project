@@ -48,7 +48,7 @@ from boxplot import *
 
 class ClassifyNetwork(nn.Module):
     def __init__(self, feature_extracting = True, IS_GPU = False, finalFeatures = 256,
-                 N_CLASSES = 81, roiSize = 7):
+                 N_CLASSES = 81, roiSize = 2):
         super(ClassifyNetwork, self).__init__()
         
         self.N_CLASSES = N_CLASSES
@@ -89,7 +89,9 @@ class ClassifyNetwork(nn.Module):
         
         for i in range(9):
             pObj[:,i,:,:] = sig(cls[:,i, :, :].detach())
-            
+        
+        if self.IS_GPU:
+          pObj = pObj.cpu()
         pObj = pObj.numpy()
         #now we have a numpy array with probabilities for each anchor box...
         originalP = pObj.copy()
@@ -110,14 +112,16 @@ class ClassifyNetwork(nn.Module):
         #Below, we get our "good" boxes in standard form
         for i in range(len(goodBox[0])):
             featureCoords = [goodBox[0][i], goodBox[1][i], goodBox[2][i], goodBox[3][i]]
+            
             t = reg[featureCoords[0], (4 * featureCoords[1]):(4 * featureCoords[1] + 4), featureCoords[2], featureCoords[3]].detach()
-        
+            if self.IS_GPU:
+              t = t.cpu()
             anchorParams = boxParams[featureCoords[1]]
             anchorCtr = [(featureCoords[3] + 0.5) * fScale, (featureCoords[2] + 0.5) * fScale]
             anchorWH = (anchorParams[0] * np.sqrt(1/anchorParams[1]), anchorParams[0] * np.sqrt(anchorParams[1]))
         
             predCtr = [(t[0] * anchorWH[0] + anchorCtr[0]).item(), (t[1] * anchorWH[1] + anchorCtr[1]).item()]
-            predWH = [(np.exp(t[2]) * anchorWH[0]).item(), (np.exp(t[3]) * anchorWH[1]).item()]
+            predWH = [(torch.exp(t[2]) * anchorWH[0]).item(), (torch.exp(t[3]) * anchorWH[1]).item()]
         
             tBox = [predCtr[0] - 0.5 * predWH[0], predCtr[1] - 0.5 * predWH[1], predCtr[0] + 0.5 * predWH[0], predCtr[1] + 0.5 * predWH[1]]
             
@@ -216,6 +220,7 @@ class ClassifyNetwork(nn.Module):
         '''
         It turns out our boxes have their coordinates flipped. We fix that here
         '''
+        
         hold = roi_annotations.clone()
         roi_annotations[:, 1] = hold[:,2]
         roi_annotations[:, 2] = hold[:,1]
@@ -225,7 +230,10 @@ class ClassifyNetwork(nn.Module):
         
         output_size = self.roiSize
         
-        roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations, output_size = output_size, spatial_scale = 1/fScale)
+        if self.IS_GPU:
+          roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations.cuda(), output_size = output_size, spatial_scale = 1/fScale)
+        else:
+          roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations, output_size = output_size, spatial_scale = 1/fScale)
         roi_pooled = torch.clamp(roi_pooled, min = -1000, max = 1000)
         #clsLoss = torch.nn.functional.cross_entropy()
         regLoss = torch.nn.SmoothL1Loss()
@@ -233,11 +241,8 @@ class ClassifyNetwork(nn.Module):
         #implement loss and backwards step!
         totalRegLoss = 0.
         totalClsLoss = 0.
-        if self.IS_GPU:
-            roi_pooled = roi_pooled.cuda()
-            catch, bboxes = self.forward(roi_pooled)
-        else:
-            catch, bboxes = self.forward(roi_pooled)
+        
+        catch, bboxes = self.forward(roi_pooled)
         
         j = 0
         for i in range(len(finalCoords)):
@@ -245,10 +250,10 @@ class ClassifyNetwork(nn.Module):
             if finalLabels[i] >= 0:
                 targetLabel = target['label'][int(finalLabels[i].item())]
                 
-                anchorCtr = [(roi_annotations[i][0] + roi_annotations[i][2] ) / 2.0,
-                             (roi_annotations[i][1] + roi_annotations[i][3] ) / 2.0]
-                anchorWH = [(roi_annotations[i][2] - roi_annotations[i][0] ) / 2.0,
-                             (roi_annotations[i][3] - roi_annotations[i][1] ) / 2.0]
+                anchorCtr = [(roi_annotations[i][1] + roi_annotations[i][3] ) / 2.0,
+                             (roi_annotations[i][2] + roi_annotations[i][4] ) / 2.0]
+                anchorWH = [(roi_annotations[i][3] - roi_annotations[i][1] ) / 2.0,
+                             (roi_annotations[i][4] - roi_annotations[i][2] ) / 2.0]
                 
                 #get actual ground truth params
                 actualBbox = target['boxes'][0][int(finalLabels[i].item())]
@@ -273,15 +278,20 @@ class ClassifyNetwork(nn.Module):
                                   np.log(actualWH[0] / anchorWH[1]), np.log(actualWH[1] / anchorWH[0])])
             
                 #compute loss for system
-                totalRegLoss += regLoss(t, bboxes[i, targetLabel, :].squeeze(0))
+                #totalRegLoss += regLoss(t, bboxes[i, targetLabel, :].squeeze(0))
                 #totalClsLoss += ((batchSize - numPos) / numPos) * torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), targetLabel)
-                totalClsLoss += torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), targetLabel)
+                if self.IS_GPU:
+                  totalClsLoss += torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), targetLabel.cuda())
+                else:
+                  totalClsLoss += torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), targetLabel)
             else:
                 if j > numPos:
                     continue
                 j += 1
-                totalClsLoss += torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), torch.tensor([self.N_CLASSES]))
-                
+                if self.IS_GPU:
+                  totalClsLoss += torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), torch.tensor([self.N_CLASSES]).cuda())
+                else:
+                  totalClsLoss += torch.nn.functional.cross_entropy(catch[i, :].unsqueeze(0), torch.tensor([self.N_CLASSES]))
         return totalClsLoss + lam * totalRegLoss
         
         
@@ -337,13 +347,15 @@ class ClassifyNetwork(nn.Module):
             featureCoords = [goodBox[0][i], goodBox[1][i], goodBox[2][i], goodBox[3][i]]
             #print(featureCoords)
             t = reg[featureCoords[0], (4 * featureCoords[1]):(4 * featureCoords[1] + 4), featureCoords[2], featureCoords[3]].detach()
-        
+
+            if self.IS_GPU:
+              t = t.cpu()
             anchorParams = boxParams[featureCoords[1]]
             anchorCtr = [(featureCoords[3] + 0.5) * fScale, (featureCoords[2] + 0.5) * fScale]
             anchorWH = (anchorParams[0] * np.sqrt(1/anchorParams[1]), anchorParams[0] * np.sqrt(anchorParams[1]))
         
             predCtr = [(t[0] * anchorWH[0] + anchorCtr[0]).item(), (t[1] * anchorWH[1] + anchorCtr[1]).item()]
-            predWH = [(np.exp(t[2]) * anchorWH[0]).item(), (np.exp(t[3]) * anchorWH[1]).item()]
+            predWH = [(torch.exp(t[2]) * anchorWH[0]).item(), (torch.exp(t[3]) * anchorWH[1]).item()]
         
             tBox = [predCtr[0] - 0.5 * predWH[0], predCtr[1] - 0.5 * predWH[1], predCtr[0] + 0.5 * predWH[0], predCtr[1] + 0.5 * predWH[1]]
             
@@ -389,7 +401,11 @@ class ClassifyNetwork(nn.Module):
             roi_annotations[:, 3] = hold[:,4]
             roi_annotations[:, 4] = hold[:,3]
             
-            roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations, output_size = output_size, spatial_scale = 1/fScale)
+            if self.IS_GPU:
+              roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations.cuda(), output_size = output_size, spatial_scale = 1/fScale)
+            else:
+              roi_pooled = torchvision.ops.roi_pool(imgFeatures, roi_annotations, output_size = output_size, spatial_scale = 1/fScale)
+            
             #roi_pooled = roi_pool(imgFeatures, roi_annotations)
             #print(roi_annotations)
             #print(roi_pooled[0,0,:,:])
@@ -399,6 +415,9 @@ class ClassifyNetwork(nn.Module):
             
             #TODO: modify for double classification
             catch, bboxes = self.forward(roi_pooled)
+            if self.IS_GPU:
+              catch = catch.cpu()
+              bboxes = bboxes.cpu()
             #print(catch)
             
             if dummyLabel:
